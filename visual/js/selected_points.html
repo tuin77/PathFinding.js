@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Image Grid Selector</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        #control-panel {
+            margin-bottom: 10px;
+        }
+        #canvas {
+            border: 1px solid #000;
+            background-color: #f0f0f0;
+        }
+        #log {
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            height: 200px;
+            overflow-y: auto;
+            background-color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div id="control-panel">
+        <label for="image-upload">上传图片（默认加载学校平面图）：</label>
+        <input type="file" id="image-upload" accept="image/*">
+        <br>
+        <label for="color-tolerance">颜色容差（1-50）：</label>
+        <input type="number" id="color-tolerance" value="15" min="1" max="50">
+    </div>
+    <canvas id="canvas"></canvas>
+    <div id="log"></div>
+
+    <script>
+        // 配置参数（与原Python代码对应）
+        const GRID_SIZE = 10;    // 每个方格大小（像素）
+        const GRID_COLS = 192;   // 列数
+        const GRID_ROWS = 108;   // 行数
+        const CANVAS_WIDTH = GRID_COLS * GRID_SIZE;
+        const CANVAS_HEIGHT = GRID_ROWS * GRID_SIZE;
+
+        // 全局变量
+        let selectedColor = null;
+        let selectedCells = [];  // 存储选中方格：{x, y, walkable: true}
+        let originalImage = null; // 原始图片
+        let resizedImage = null;  // 适配画布的图片
+        let canvas = null;
+        let ctx = null;
+        let logElement = null;
+
+        // 初始化函数（页面加载后执行）
+        window.onload = function() {
+            // 绑定DOM元素
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+            logElement = document.getElementById('log');
+            const imageUpload = document.getElementById('image-upload');
+            const colorToleranceInput = document.getElementById('color-tolerance');
+
+            // 设置画布尺寸
+            canvas.width = CANVAS_WIDTH;
+            canvas.height = CANVAS_HEIGHT;
+
+            // 监听图片上传
+            imageUpload.addEventListener('change', handleImageUpload);
+
+            // 监听鼠标点击事件
+            canvas.addEventListener('click', handleMouseClick);
+
+            // 尝试加载默认图片（需与HTML文件同目录）
+            loadDefaultImage();
+
+            // 初始绘制画布
+            updateCanvas();
+
+            // 打印初始提示
+            log('按ESC键清空选中；点击网格选择相似颜色方格；再次点击已选中区域取消');
+        };
+
+        // 加载默认图片（对应原Python的school-floor-plan.jpg）
+        function loadDefaultImage() {
+            const defaultImagePath = 'school-floor-plan.jpg'; // 需确保文件存在
+            const img = new Image();
+            
+            img.onload = function() {
+                originalImage = img;
+                resizeImage(); // 适配画布尺寸
+                log(`成功加载默认图片，尺寸：${originalImage.width}x${originalImage.height}`);
+                updateCanvas();
+            };
+            
+            img.onerror = function() {
+                log(`默认图片加载失败：${defaultImagePath}（可通过上传按钮手动添加）`);
+            };
+            
+            img.src = defaultImagePath;
+        }
+
+        // 处理图片上传
+        function handleImageUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    originalImage = img;
+                    resizeImage(); // 适配画布尺寸
+                    log(`成功上传图片，尺寸：${originalImage.width}x${originalImage.height}`);
+                    // 上传新图片时清空选中状态
+                    selectedCells = [];
+                    updateCanvas();
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // 调整图片尺寸适配画布
+        function resizeImage() {
+            if (!originalImage) return;
+
+            // 创建临时canvas处理缩放
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCanvas.width = CANVAS_WIDTH;
+            tempCanvas.height = CANVAS_HEIGHT;
+
+            // 绘制缩放后的图片（保持比例，空白处用浅灰色填充）
+            tempCtx.fillStyle = '#f0f0f0';
+            tempCtx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            
+            // 计算缩放比例（保持图片比例，不拉伸）
+            const scaleX = CANVAS_WIDTH / originalImage.width;
+            const scaleY = CANVAS_HEIGHT / originalImage.height;
+            const scale = Math.min(scaleX, scaleY);
+            const drawWidth = originalImage.width * scale;
+            const drawHeight = originalImage.height * scale;
+            const offsetX = (CANVAS_WIDTH - drawWidth) / 2;
+            const offsetY = (CANVAS_HEIGHT - drawHeight) / 2;
+
+            tempCtx.drawImage(originalImage, offsetX, offsetY, drawWidth, drawHeight);
+            
+            // 保存缩放后的图片数据
+            resizedImage = tempCtx.getImageData(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        }
+
+        // 处理鼠标点击事件
+        function handleMouseClick(e) {
+            // 获取点击的画布坐标（适配画布缩放）
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
+            const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
+
+            // 计算网格坐标
+            const gridX = Math.floor(x / GRID_SIZE);
+            const gridY = Math.floor(y / GRID_SIZE);
+
+            // 检查坐标是否在网格范围内
+            if (gridX < 0 || gridX >= GRID_COLS || gridY < 0 || gridY >= GRID_ROWS) {
+                log(`点击超出网格范围：(${gridX}, ${gridY})`);
+                return;
+            }
+
+            // 获取点击位置的颜色（从缩放后的图片中取）
+            selectedColor = getPixelColor(x, y);
+            log(`已选择颜色：${selectedColor.join(', ')} | 网格坐标：(${gridX}, ${gridY})`);
+
+            // 检查当前网格是否已选中
+            if (isCellSelected(gridX, gridY)) {
+                // 取消选中
+                removeCellFromSelected(gridX, gridY);
+                log(`取消选中网格：(${gridX}, ${gridY})`);
+            } else {
+                // 查找相似颜色的方格
+                const newCells = findSimilarColorCells(selectedColor);
+                // 去重并添加
+                const addedCount = newCells.filter(cell => !isCellSelected(cell.x, cell.y))
+                                          .reduce((count, cell) => {
+                                              selectedCells.push(cell);
+                                              return count + 1;
+                                          }, 0);
+                log(`新增 ${addedCount} 个相似颜色方格`);
+            }
+
+            // 打印总选中数
+            log(`当前共选中 ${selectedCells.length} 个方格`);
+            // 更新画布
+            updateCanvas();
+        }
+
+        // 获取指定坐标的像素颜色（RGBA）
+        function getPixelColor(x, y) {
+            if (!resizedImage) return [255, 255, 255, 255]; // 默认白色（含透明度）
+
+            // 确保坐标在图片范围内
+            x = Math.min(Math.max(x, 0), resizedImage.width - 1);
+            y = Math.min(Math.max(y, 0), resizedImage.height - 1);
+
+            // 从ImageData中取像素（每个像素4个值：R, G, B, A）
+            const pixelIndex = (y * resizedImage.width + x) * 4;
+            return [
+                resizedImage.data[pixelIndex],     // R
+                resizedImage.data[pixelIndex + 1], // G
+                resizedImage.data[pixelIndex + 2], // B
+                resizedImage.data[pixelIndex + 3]  // A
+            ];
+        }
+
+        // 检查网格是否已选中
+        function isCellSelected(x, y) {
+            return selectedCells.some(cell => cell.x === x && cell.y === y);
+        }
+
+        // 从选中列表移除方格
+        function removeCellFromSelected(x, y) {
+            selectedCells = selectedCells.filter(cell => !(cell.x === x && cell.y === y));
+        }
+
+        // 查找相似颜色的方格（核心逻辑）
+        function findSimilarColorCells(targetColor) {
+            const similarCells = [];
+            if (!resizedImage) return similarCells;
+
+            // 获取当前颜色容差（用户可调整）
+            const colorTolerance = parseInt(document.getElementById('color-tolerance').value);
+            // 总容差 = 容差 * 3（RGB三个通道），与原Python逻辑一致
+            const totalTolerance = colorTolerance * 3;
+
+            // 遍历所有网格
+            for (let y = 0; y < GRID_ROWS; y++) {
+                for (let x = 0; x < GRID_COLS; x++) {
+                    // 取网格中心坐标（避免边缘误差）
+                    const centerX = x * GRID_SIZE + Math.floor(GRID_SIZE / 2);
+                    const centerY = y * GRID_SIZE + Math.floor(GRID_SIZE / 2);
+
+                    // 获取中心坐标的颜色
+                    const cellColor = getPixelColor(centerX, centerY);
+                    // 计算RGB通道的总差异（忽略透明度A）
+                    const colorDiff = Math.abs(cellColor[0] - targetColor[0]) +
+                                      Math.abs(cellColor[1] - targetColor[1]) +
+                                      Math.abs(cellColor[2] - targetColor[2]);
+
+                    // 差异小于容差则视为相似
+                    if (colorDiff <= totalTolerance) {
+                        similarCells.push({ x, y, walkable: true });
+                    }
+                }
+            }
+
+            return similarCells;
+        }
+
+        // 更新画布（绘制图片、网格、选中区域）
+        function updateCanvas() {
+            // 1. 清空画布（浅灰色背景）
+            ctx.fillStyle = '#f0f0f0';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // 2. 绘制缩放后的图片
+            if (resizedImage) {
+                ctx.putImageData(resizedImage, 0, 0);
+            }
+
+            // 3. 绘制网格线（黑色）
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 1;
+            // 竖线（列）
+            for (let x = 0; x <= CANVAS_WIDTH; x += GRID_SIZE) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, CANVAS_HEIGHT);
+                ctx.stroke();
+            }
+            // 横线（行）
+            for (let y = 0; y <= CANVAS_HEIGHT; y += GRID_SIZE) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(CANVAS_WIDTH, y);
+                ctx.stroke();
+            }
+
+            // 4. 绘制选中区域（红色边框）
+            if (selectedCells.length > 0) {
+                ctx.strokeStyle = '#ff0000'; // 红色
+                ctx.lineWidth = 2;
+                selectedCells.forEach(cell => {
+                    const x1 = cell.x * GRID_SIZE;
+                    const y1 = cell.y * GRID_SIZE;
+                    const x2 = x1 + GRID_SIZE;
+                    const y2 = y1 + GRID_SIZE;
+                    ctx.beginPath();
+                    ctx.rect(x1, y1, GRID_SIZE, GRID_SIZE);
+                    ctx.stroke();
+                });
+            }
+        }
+
+        // 日志打印函数（对应原Python的print）
+        function log(message) {
+            const now = new Date().toLocaleTimeString();
+            const logItem = document.createElement('div');
+            logItem.textContent = `[${now}] ${message}`;
+            logElement.appendChild(logItem);
+            // 滚动到最新日志
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        // 监听ESC键（清空选中）
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                selectedCells = [];
+                log('已清空所有选中方格');
+                updateCanvas();
+            }
+        });
+    </script>
+</body>
+</html>
